@@ -1,0 +1,451 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+<script type="text/javascript" src="/socket.io/socket.io.js"></script>
+<script src="https://maps.google.com/maps/api/js?sensor=false&key=AIzaSyD40Rs2sFK4xZ1ly-HhsWV8FC7cXyejqRQ "></script>
+</head>
+
+<body>
+<span id="login" style="display:block;">
+User name:
+<input type="text" name="userName" value="" id="txtUser">
+<button id="btnEnter" onclick="setUser()">Enter</button>
+<br>
+<br>
+</span>
+
+<div style="float:left;">
+<canvas id="CanvasUsers" width="350" height="500" style="border:1px solid #000000;">
+</canvas> 
+<canvas id="CanvasGame" width="500" height="500" style="border:1px solid #000000;">
+</canvas> 
+</div>
+
+<div style="float:left; margin-left:5px;">
+<p>W    : accelerate up</p>
+<p>A    : move left</p>
+<p>D    : move right</p>
+<p>Space: attack with bullets</p>
+<p>To Chat click the button Open Chat</p>
+<p id="roundtrip"></p>
+<p id="latency"></p>
+<p id="elapsed"></p>
+<p id="fps"></p>
+<input type="checkbox" id="prediction" onchange="updateParameters()">Prediction</input> 
+<input type="checkbox" id="reconciliation" onchange="updateParameters()">Reconciliation</input> 
+</div>
+
+<div style="clear: both;"></div>
+
+<div>
+<button id="chatEnter" onclick="enterChat()">Open Chat</button>
+</div>
+
+<div id="chat" style="display:none;">
+<div id="chat-text" style="width:500px; height:100px; overflow-y:scroll"></div>
+
+<form id="chat-form">
+<input id="chat-input" type="text" style="width:500px"></input>
+</form>
+</div>
+<button id="chatClose" onclick="closeChat()" style="display:none;">Close Chat</button>
+<p id="demo"></p>
+<div id="mapholder"></div>
+
+<script>
+var client_fps=60;
+
+var socket=io();
+
+var Player=function(){//player constructor
+ 
+	this.name= null;
+	this.lat= null;
+	this.lon= null;
+	this.score= 0;
+	this.width= 25;
+	this.height= 25;
+	this.x= 25;
+	this.y= 25;
+	this.gravitySpeed= 0;
+	this.gravity= 0.06;
+	this.pressingRight= false;
+	this.pressingLeft= false;
+    this.pressingUp= false;
+    //data needed for reconsiliation
+    this.input_sequence_number=0;
+    this.pending_inputs=[];
+	
+	this.updatePosition=function(dt){
+		if(this.pressingRight){
+			this.x+=5;
+		}	
+		if(this.pressingLeft){
+			this.x-=5;
+		}
+		if(this.pressingUp){
+			this.gravitySpeed+=-0.2;
+			this.y=this.y+this.gravitySpeed;
+		}
+	
+		//this.gravitySpeed+=this.gravity;
+		//this.y=this.y+this.gravitySpeed;
+	};//end of update position
+	
+	this.hitBoundaries=function(){
+		if(this.x<0)
+			this.x=0; //left boundary
+		if(this.x+25>500)
+			this.x=500-25; //right boundary
+		if(this.y+25>500){
+			this.y=500-25; //bottom boundary	
+			this.score=0;   //hit bottom clear player score
+			this.gravity=0;
+		}else
+			this.gravity=0.06;
+	};
+	   return this;
+	};
+	
+var player=new Player();
+	
+Player.update=function(){
+		player.updatePosition();
+		player.hitBoundaries();
+ }	
+
+function setUser(){
+var userName = document.getElementById("txtUser").value;
+      player.name=userName;
+
+	socket.emit('username',{
+		userN: userName
+	});
+	
+	document.getElementById("login").style.display="none";
+}
+
+socket.on("users",function(data){
+	var ctxU=document.getElementById("CanvasUsers").getContext("2d");
+	if(data.clearRect==0){
+		ctxU.font="15px Arial";
+		ctxU.clearRect(0,0,350,500);
+		ctxU.fillStyle = "black";
+		ctxU.fillText(data.name + " connected ",5,data.y);
+		ctxU.fillText(data.agent,5,data.y+15);
+		ctxU.fillStyle = data.color;
+		ctxU.fillRect(150,data.y-10,15,10);	
+		
+	}else{
+		ctxU.font="15px Arial";
+		ctxU.fillStyle = "black";
+		ctxU.fillText(data.name + " connected ",5,data.y);
+		ctxU.fillText(data.agent,5,data.y+15);
+		ctxU.fillStyle = data.color;
+		ctxU.fillRect(150,data.y-10,15,10);
+	}
+});
+
+var server_reconciliation=false;
+var client_prediction=false;
+
+function  updateParameters(){
+	  var cb_prediction = document.getElementById("prediction");
+	  var cb_reconciliation = document.getElementById("reconciliation");
+
+	  // Client Side Prediction 
+	  if (cb_prediction.checked) {
+		  client_prediction=true;
+	  }else
+		  client_prediction=false;
+
+	  // Server Reconciliation 
+	  if (cb_reconciliation.checked) {
+		  server_reconciliation = true;
+	  }else
+		  server_reconciliation = false;
+	}
+
+socket.on('newPosition',function(data){
+	var spaceX=10;
+    var ctxG=document.getElementById("CanvasGame").getContext("2d");
+	//ctxG.clearRect(0,0,500,500);
+	for(var i=0; i<data.player.length; i++){
+		ctxG.fillStyle = data.player[i].color;
+		ctxG.font="17px Arial";
+		//ctxG.fillText(data.player[i].name + ": " +data.player[i].playerScore,spaceX,17);
+		ctxG.fillRect(data.player[i].x,data.player[i].y,25,25);
+		
+		//set the position sent by the server
+		if(client_prediction){
+			player.x=data.player[i].x;
+			player.y=data.player[i].y;
+		}
+	
+		
+
+		if(server_reconciliation){
+			var j=0;
+			while(j<player.pending_inputs.length){
+				var input=player.pending_inputs[j];
+				//console.log(input.input_sequence_number + " <= " + data.player[i].last_processed_input) ;
+				//console.log("input lenght "+player.pending_inputs.length);
+				if(input.input_sequence_number<=data.player[i].last_processed_input)
+					{
+					player.pending_inputs.splice(j,1);
+					console.log(input.input_sequence_number);
+					}
+				else{
+					if(input.direction===68)
+						{
+						player.x+=5;
+						//console.log("right");
+						}
+					else if(input.direction===65)
+						{
+						player.x-=5;
+						//console.log("left");
+						}
+					j++;		
+				}
+			}
+		}else{	
+			player.pending_inputs=[];
+		}
+		
+		
+		
+		spaceX+=80;
+	
+		/*
+		if(data.player[i].sideAttack==='left')
+			ctxG.fillRect(data.player[i].x-5,data.player[i].y+10.5,5,5);
+		if(data.player[i].sideAttack==='right')
+			ctxG.fillRect(data.player[i].x+25,data.player[i].y+10.5,5,5);*/
+	    }
+/*
+	for(var i=0; i<data.obstacle.length; i++){
+			ctxG.fillStyle = data.obstacle[i].color;
+			ctxG.fillRect(data.obstacle[i].x,data.obstacle[i].y,data.obstacle[i].width,data.obstacle[i].height);	
+		}//end of for i	
+/*		
+	for(i=0; i<data.bullet.length; i++){
+		ctxG.fillStyle = data.bullet[i].color;
+		ctxG.fillRect(data.bullet[i].x,data.bullet[i].y,data.bullet[i].width,data.bullet[i].height);	
+	}//end of for i	
+*/
+});//end of new position
+
+
+	document.onkeydown=function(event){
+	if(event.keyCode===68)
+		{
+		socket.emit('keypress',{inputId:'right',state:true,sequence:player.input_sequence_number});
+		player.pressingRight=true;
+		}
+	else if(event.keyCode===65)
+		{
+		socket.emit('keypress',{inputId:'left',state:true,sequence:player.input_sequence_number});
+		player.pressingLeft=true;
+		}
+	else if(event.keyCode===87)
+		{
+		socket.emit('keypress',{inputId:'up',state:true,sequence:player.input_sequence_number});
+		player.pressingUp=true;
+		}
+	else if(event.keyCode===32)
+		{
+		socket.emit('keypress',{inputId:'attack',state:true,sequence:player.input_sequence_number});
+		}
+	var input;
+	input={direction:event.keyCode,input_sequence_number:player.input_sequence_number++};
+	player.pending_inputs.push(input);
+}
+	document.onkeyup=function(event){
+		if(event.keyCode===68)
+			{
+			socket.emit('keypress',{inputId:'right',state:false});
+			player.pressingRight=false;
+			}
+		else if(event.keyCode===65)
+			{
+			socket.emit('keypress',{inputId:'left',state:false});
+			player.pressingLeft=false;
+			}
+		else if(event.keyCode===87)
+			{
+			socket.emit('keypress',{inputId:'up',state:false});
+			player.pressingUp=false;
+			}
+		else if(event.keyCode===32)
+			socket.emit('keypress',{inputId:'attack',state:false});
+	}
+	
+	   var ctxG=document.getElementById("CanvasGame").getContext("2d");
+  
+	   var time;
+	   var fps=0;
+	   var elapsed;
+	   
+	setInterval(function(){
+	
+		var now=new Date().getTime();
+		var dt=now-time;
+		elapsed+=dt;
+		time=now;
+		
+		
+	if(player.name!=null){//check if player connected
+		Player.update();
+		ctxG.clearRect(0,0,500,500);
+		ctxG.fillRect(player.x,player.y,25,25);
+	}
+
+		if(elapsed<=1000)
+		      fps++;
+		else{
+			document.getElementById("fps").innerHTML="Fps: " + fps;
+			fps=0;
+			elapsed=0;
+			syncClocks();
+		}	
+		
+	},1000/client_fps);
+
+
+/*
+var time;
+function draw(){
+	requestAnimationFrame(draw);
+	var now=new Date().getTime();
+	var dt=now-time;
+	time=now;
+	
+	    	ctxG.clearRect(0,0,500,500);
+	    	player.updatePosition(dt);
+	    	ctxG.fillRect(player.x,player.y,25,25);
+}
+
+draw();
+*/
+function syncClocks(){
+		var time=new Date().getTime()/1000;
+		socket.emit('clientTime',time);
+	}	
+
+socket.on('serverTime',function(data){
+	var time=new Date().getTime()/1000;
+	var clientTime=data.clientT;
+	document.getElementById("roundtrip").innerHTML="Round trip: "+((time-clientTime)*1000).toFixed(2) + " ms";
+	document.getElementById("latency").innerHTML="Latency: "+((time-clientTime)*1000/2).toFixed(2) + " ms";
+});
+
+var chatText=document.getElementById("chat-text");
+var chatInput=document.getElementById("chat-input");
+var chatForm=document.getElementById("chat-form");
+
+function enterChat(){
+	document.getElementById("chat").style.display="block";
+	document.getElementById("chatEnter").style.display="none";
+	document.getElementById("chatClose").style.display="block";
+	document.getElementById("chatEnter").style.color="black";
+}
+
+function closeChat(){
+	document.getElementById("chat").style.display="none";
+	document.getElementById("chatEnter").style.display="block";
+	document.getElementById("chatClose").style.display="none";
+	document.getElementById("chatEnter").style.color="black";
+}
+
+socket.on('addToChat',function(data){
+	chatText.innerHTML+='<div>' + data + '</div>';	
+	chatText.scrollTop=chatText.scrollHeight;
+	document.getElementById("chatEnter").style.color="red";
+});
+
+chatForm.onsubmit=function(e){
+	e.preventDefault();
+	socket.emit('sendMsgToServer',chatInput.value);
+	chatInput.value='';
+}
+
+var x = document.getElementById("demo");
+function getLocation() {
+    if (navigator.geolocation) {
+        navigator.geolocation.getCurrentPosition(showPosition, showError);
+    } else { 
+        x.innerHTML = "Geolocation is not supported by this browser.";
+    }
+}
+
+function showPosition(position) {
+    lat = position.coords.latitude;
+    lon = position.coords.longitude;
+    
+    socket.emit('coords',{
+    	lat:lat,
+    	lon:lon
+    }); 
+}  
+
+mapholder = document.getElementById('mapholder')
+mapholder.style.height = '250px';
+mapholder.style.width = '500px';
+
+socket.on('addCoords',function(data){	    
+	if(data.length==1){
+		    latlon = new google.maps.LatLng(data[0].lat, data[0].lon);
+		    var myOptions = {
+		    	  center:latlon,
+				    zoom:13,
+			   mapTypeId:google.maps.MapTypeId.ROADMAP,
+		  mapTypeControl:false,
+	navigationControlOptions:{style:google.maps.NavigationControlStyle.SMALL}
+				    }
+		    var map = new google.maps.Map(document.getElementById("mapholder"), myOptions);
+		    var marker = new google.maps.Marker({position:latlon,map:map,title:"You are here!"});
+		}else{
+		    var marker;	
+			var bounds = new google.maps.LatLngBounds();
+			var myOptions = {
+					    zoom:13,
+				   mapTypeId:google.maps.MapTypeId.ROADMAP,
+			  mapTypeControl:false,
+		navigationControlOptions:{style:google.maps.NavigationControlStyle.SMALL}
+					    }
+   			 var map = new google.maps.Map(document.getElementById('mapholder'), myOptions);
+	
+			for(var i=0; i<data.length; i++){
+   				 latlon = new google.maps.LatLng(data[i].lat, data[i].lon);
+    	  	 	 marker = new google.maps.Marker({position:latlon,map:map,title:"You are here!"});
+   				 bounds.extend(latlon);   
+			}
+				map.fitBounds(bounds); 
+		}	
+});
+
+function showError(error) {
+    switch(error.code) {
+        case error.PERMISSION_DENIED:
+            x.innerHTML = "User denied the request for Geolocation."
+            break;
+        case error.POSITION_UNAVAILABLE:
+            x.innerHTML = "Location information is unavailable."
+            break;
+        case error.TIMEOUT:
+            x.innerHTML = "The request to get user location timed out."
+            break;
+        case error.UNKNOWN_ERROR:
+            x.innerHTML = "An unknown error occurred."
+            break;
+    }
+}
+
+getLocation();
+
+</script>
+
+</body>
+</html>
